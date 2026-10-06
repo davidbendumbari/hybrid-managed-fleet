@@ -1,0 +1,141 @@
+---
+- name: Baseline security and setup for every fleet server
+  hosts: fleet
+  become: true
+
+  vars:
+    baseline_packages:
+      - ufw
+      - fail2ban
+      - unattended-upgrades
+      - chrony
+      - auditd
+      - htop
+      - curl
+      - unzip
+
+  tasks:
+    - name: Refresh the package list
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 180
+
+    - name: Install all pending updates
+      ansible.builtin.apt:
+        upgrade: dist
+        lock_timeout: 180
+
+    - name: Install baseline packages
+      ansible.builtin.apt:
+        name: "{{ baseline_packages }}"
+        state: present
+        lock_timeout: 180
+
+    - name: Set the server name
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Set the timezone to UTC
+      community.general.timezone:
+        name: UTC
+
+    - name: Write hardened SSH settings
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/01-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          MaxAuthTries 3
+          LoginGraceTime 30
+          X11Forwarding no
+          ClientAliveInterval 300
+          ClientAliveCountMax 2
+      notify: Restart SSH
+
+    - name: Check the SSH configuration is valid
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Allow SSH with rate limiting
+      community.general.ufw:
+        rule: limit
+        port: "22"
+        proto: tcp
+
+    - name: Turn on the firewall and block all other inbound traffic
+      community.general.ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+
+    - name: Configure fail2ban for SSH
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.local
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [DEFAULT]
+          bantime = 1h
+          findtime = 10m
+          maxretry = 3
+
+          [sshd]
+          enabled = true
+          backend = systemd
+      notify: Restart fail2ban
+
+    - name: Turn on automatic security updates
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+
+    - name: Apply safe network hardening settings
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          net.ipv4.tcp_syncookies = 1
+          net.ipv4.conf.all.rp_filter = 1
+          net.ipv4.conf.all.accept_redirects = 0
+          net.ipv4.conf.all.send_redirects = 0
+          net.ipv4.icmp_echo_ignore_broadcasts = 1
+      notify: Reload sysctl
+
+    - name: Make sure key services are running and start on boot
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - chrony
+        - auditd
+        - fail2ban
+        - unattended-upgrades
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
+
+    - name: Reload sysctl
+      ansible.builtin.command: sysctl --system
