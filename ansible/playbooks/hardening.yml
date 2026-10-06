@@ -1,0 +1,155 @@
+---
+- name: Extra hardening on top of the baseline
+  hosts: fleet
+  become: true
+
+  vars:
+    banner_text: "Authorized access only. Activity is logged and monitored."
+    extra_packages:
+      - libpam-tmpdir
+      - debsums
+      - apt-show-versions
+      - needrestart
+
+  tasks:
+    - name: Install extra security packages
+      ansible.builtin.apt:
+        name: "{{ extra_packages }}"
+        state: present
+        lock_timeout: 180
+
+    - name: Set login banners
+      ansible.builtin.copy:
+        dest: "{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: "{{ banner_text }}\n"
+      loop:
+        - /etc/issue
+        - /etc/issue.net
+
+    - name: Add extra SSH hardening settings
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/02-hardening-extra.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          AllowAgentForwarding no
+          AllowTcpForwarding no
+          TCPKeepAlive no
+          MaxSessions 2
+          LogLevel VERBOSE
+          Banner /etc/issue.net
+      notify: Restart SSH
+
+    - name: Check the SSH configuration is valid
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Add extra kernel and network protections
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-hardening-extra.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          kernel.randomize_va_space = 2
+          kernel.kptr_restrict = 2
+          kernel.dmesg_restrict = 1
+          kernel.sysrq = 0
+          kernel.yama.ptrace_scope = 1
+          net.core.bpf_jit_harden = 2
+          fs.suid_dumpable = 0
+          fs.protected_fifos = 2
+          fs.protected_regular = 2
+          net.ipv4.conf.all.log_martians = 1
+          net.ipv4.conf.default.log_martians = 1
+          net.ipv4.conf.all.accept_source_route = 0
+          net.ipv4.conf.default.accept_source_route = 0
+          net.ipv4.conf.default.accept_redirects = 0
+          net.ipv4.conf.default.send_redirects = 0
+          net.ipv6.conf.all.accept_redirects = 0
+          net.ipv6.conf.default.accept_redirects = 0
+      notify: Reload sysctl
+
+    - name: Block rarely used risky protocols and filesystems
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/99-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          install dccp /bin/true
+          install sctp /bin/true
+          install rds /bin/true
+          install tipc /bin/true
+          install cramfs /bin/true
+          install freevxfs /bin/true
+          install jffs2 /bin/true
+          install hfs /bin/true
+          install hfsplus /bin/true
+
+    - name: Disable core dumps
+      ansible.builtin.copy:
+        dest: /etc/security/limits.d/10-no-coredump.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          * hard core 0
+
+    - name: Set stricter default file permissions and password ageing
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^{{ item.key }}\s'
+        line: "{{ item.key }}   {{ item.value }}"
+      loop:
+        - { key: "UMASK", value: "027" }
+        - { key: "PASS_MAX_DAYS", value: "365" }
+        - { key: "PASS_MIN_DAYS", value: "1" }
+        - { key: "PASS_WARN_AGE", value: "14" }
+
+    - name: Tighten permissions on sensitive files and folders
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: "{{ item.state }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /etc/ssh/sshd_config, state: file, mode: "0600" }
+        - { path: /etc/crontab, state: file, mode: "0600" }
+        - { path: /etc/cron.d, state: directory, mode: "0700" }
+        - { path: /etc/cron.daily, state: directory, mode: "0700" }
+        - { path: /etc/cron.hourly, state: directory, mode: "0700" }
+        - { path: /etc/cron.weekly, state: directory, mode: "0700" }
+        - { path: /etc/cron.monthly, state: directory, mode: "0700" }
+
+    - name: Add audit rules that watch critical files
+      ansible.builtin.copy:
+        dest: /etc/audit/rules.d/99-hardening.rules
+        owner: root
+        group: root
+        mode: "0640"
+        content: |
+          -w /etc/passwd -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/sudoers -p wa -k sudoers
+          -w /etc/sudoers.d/ -p wa -k sudoers
+          -w /etc/ssh/sshd_config -p wa -k sshd
+          -w /etc/ssh/sshd_config.d/ -p wa -k sshd
+          -w /var/log/lastlog -p wa -k logins
+      notify: Reload audit rules
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+    - name: Reload sysctl
+      ansible.builtin.command: sysctl --system
+
+    - name: Reload audit rules
+      ansible.builtin.command: augenrules --load
