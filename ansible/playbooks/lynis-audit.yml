@@ -1,0 +1,37 @@
+---
+- name: Run a Lynis security audit and report the score
+  hosts: fleet
+  become: true
+
+  tasks:
+    - name: Install Lynis
+      ansible.builtin.apt:
+        name: lynis
+        state: present
+        update_cache: true
+        lock_timeout: 180
+
+    - name: Run the audit
+      ansible.builtin.command: lynis audit system --quick --no-colors
+      register: lynis_run
+      changed_when: false
+      failed_when: false
+
+    - name: Read score, warnings and suggestions
+      ansible.builtin.shell: |
+        s=$(grep '^hardening_index=' /var/log/lynis-report.dat | cut -d= -f2)
+        w=$(grep -c '^warning\[\]=' /var/log/lynis-report.dat || true)
+        g=$(grep -c '^suggestion\[\]=' /var/log/lynis-report.dat || true)
+        echo "score=$s warnings=$w suggestions=$g"
+      register: lynis_score
+      changed_when: false
+
+    - name: Show the result
+      ansible.builtin.debug:
+        msg: "{{ label | default('unlabeled') }}: {{ lynis_score.stdout }}"
+
+    - name: Save the full report in CloudShell
+      ansible.builtin.fetch:
+        src: /var/log/lynis-report.dat
+        dest: "{{ playbook_dir }}/../reports/{{ inventory_hostname }}-{{ label | default('unlabeled') }}.dat"
+        flat: true
