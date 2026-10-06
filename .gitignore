@@ -45,3 +45,5 @@ terraform.rc
 
 ansible/inventory.ini
 *.retry
+
+ansible/reports/
