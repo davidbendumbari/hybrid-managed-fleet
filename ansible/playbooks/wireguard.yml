@@ -1,5 +1,5 @@
 ---
-- name: WireGuard tunnel from the AWS node to the home lab
+- name: WireGuard tunnel from the AWS node to the Alpine VM in the lab
   hosts: fleet
   become: true
 
@@ -7,8 +7,24 @@
     wg_port: 51820
     wg_address: "10.99.0.1/30"
     lab_tunnel_ip: "10.99.0.2/32"
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.fleet-secrets"
 
   tasks:
+    - name: Look for saved keys in CloudShell
+      ansible.builtin.stat:
+        path: "{{ secrets_dir }}/{{ item }}"
+      delegate_to: localhost
+      become: false
+      loop:
+        - aws.key
+        - lab.pub
+      register: saved
+
+    - name: Use the saved lab public key
+      ansible.builtin.set_fact:
+        lab_public_key: "{{ lookup('file', secrets_dir ~ '/lab.pub') | trim }}"
+      when: saved.results[1].stat.exists and lab_public_key is not defined
+
     - name: Install WireGuard
       ansible.builtin.apt:
         name: wireguard
@@ -16,24 +32,27 @@
         update_cache: true
         lock_timeout: 180
 
-    - name: Create the server private key (only once)
-      ansible.builtin.shell: umask 077 && wg genkey > /etc/wireguard/server.key
-      args:
-        creates: /etc/wireguard/server.key
-
-    - name: Keep the private key readable by root only
-      ansible.builtin.file:
-        path: /etc/wireguard/server.key
+    - name: Install the saved server key from CloudShell
+      ansible.builtin.copy:
+        src: "{{ secrets_dir }}/aws.key"
+        dest: /etc/wireguard/server.key
         owner: root
         group: root
         mode: "0600"
+      when: saved.results[0].stat.exists
+      no_log: true
+
+    - name: Otherwise create a new server key
+      ansible.builtin.shell: umask 077 && wg genkey > /etc/wireguard/server.key
+      args:
+        creates: /etc/wireguard/server.key
 
     - name: Work out the public key
       ansible.builtin.shell: wg pubkey < /etc/wireguard/server.key
       register: wg_pub
       changed_when: false
 
-    - name: Show the public key to paste into OPNsense
+    - name: Show the public key
       ansible.builtin.debug:
         msg: "AWS WIREGUARD PUBLIC KEY: {{ wg_pub.stdout }}"
 
@@ -43,8 +62,8 @@
         port: "{{ wg_port }}"
         proto: udp
 
-    - name: Configure and start the tunnel (needs the lab details)
-      when: lab_public_key is defined and lab_mgmt_subnet is defined
+    - name: Configure and start the tunnel
+      when: lab_public_key is defined
       block:
         - name: Read the private key
           ansible.builtin.slurp:
@@ -66,7 +85,7 @@
 
               [Peer]
               PublicKey = {{ lab_public_key }}
-              AllowedIPs = {{ lab_tunnel_ip }}, {{ lab_mgmt_subnet }}
+              AllowedIPs = {{ lab_tunnel_ip }}
           no_log: true
           notify: Restart WireGuard
 
