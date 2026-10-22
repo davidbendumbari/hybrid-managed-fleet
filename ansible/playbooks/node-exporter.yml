@@ -1,0 +1,75 @@
+---
+- name: Metrics agent on the AWS node, reachable only through the tunnel
+  hosts: fleet
+  become: true
+
+  vars:
+    tunnel_ip: "10.99.0.1"
+    monitor_ip: "10.99.0.2"
+
+  tasks:
+    - name: Install node exporter
+      ansible.builtin.apt:
+        name: prometheus-node-exporter
+        state: present
+        update_cache: true
+        lock_timeout: 180
+
+    - name: Listen on the tunnel address only
+      ansible.builtin.copy:
+        dest: /etc/default/prometheus-node-exporter
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          ARGS="--web.listen-address={{ tunnel_ip }}:9100"
+      notify: Restart node exporter
+
+    - name: Create the service override folder
+      ansible.builtin.file:
+        path: /etc/systemd/system/prometheus-node-exporter.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Start after the tunnel and retry if it is not ready
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/prometheus-node-exporter.service.d/tunnel.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          After=wg-quick@wg0.service
+          Wants=wg-quick@wg0.service
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+      notify: Restart node exporter
+
+    - name: Apply changes now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Make sure it is running and starts on boot
+      ansible.builtin.systemd:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+
+    - name: Allow metrics only from the monitoring VM through the tunnel
+      community.general.ufw:
+        rule: allow
+        direction: in
+        interface: wg0
+        from_ip: "{{ monitor_ip }}"
+        to_port: "9100"
+        proto: tcp
+
+  handlers:
+    - name: Restart node exporter
+      ansible.builtin.systemd:
+        name: prometheus-node-exporter
+        state: restarted
+        daemon_reload: true
