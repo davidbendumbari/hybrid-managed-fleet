@@ -95,6 +95,8 @@ EOF
 
 systemctl daemon-reload
 systemctl enable prometheus prometheus-node-exporter grafana-server
+chown root:prometheus /etc/prometheus/prometheus.yml /etc/prometheus/rules.yml
+chmod 640 /etc/prometheus/prometheus.yml /etc/prometheus/rules.yml
 systemctl restart prometheus prometheus-node-exporter grafana-server
 sleep 5
 
