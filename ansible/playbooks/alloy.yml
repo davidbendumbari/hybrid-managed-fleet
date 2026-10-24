@@ -1,0 +1,99 @@
+---
+- name: Ship the AWS node's logs to Loki in the lab through the tunnel
+  hosts: fleet
+  become: true
+
+  vars:
+    loki_url: "http://10.99.0.2:3100/loki/api/v1/push"
+
+  tasks:
+    - name: Install tools needed to add the Grafana repository
+      ansible.builtin.apt:
+        name:
+          - curl
+          - gpg
+          - ca-certificates
+        state: present
+        update_cache: true
+        lock_timeout: 180
+
+    - name: Make sure the keyrings folder exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Add the Grafana signing key
+      ansible.builtin.shell: curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
+      args:
+        creates: /etc/apt/keyrings/grafana.gpg
+
+    - name: Add the Grafana repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/grafana.list
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main
+
+    - name: Install Alloy
+      ansible.builtin.apt:
+        name: alloy
+        state: present
+        update_cache: true
+        lock_timeout: 180
+
+    - name: Let Alloy read the system journal
+      ansible.builtin.user:
+        name: alloy
+        groups: systemd-journal
+        append: true
+
+    - name: Write the Alloy configuration
+      ansible.builtin.copy:
+        dest: /etc/alloy/config.alloy
+        owner: root
+        group: alloy
+        mode: "0640"
+        content: |
+          loki.relabel "journal" {
+            forward_to = []
+            rule {
+              source_labels = ["__journal__systemd_unit"]
+              target_label  = "unit"
+            }
+            rule {
+              source_labels = ["__journal_priority_keyword"]
+              target_label  = "level"
+            }
+          }
+
+          loki.source.journal "read" {
+            forward_to    = [loki.write.lab.receiver]
+            relabel_rules = loki.relabel.journal.rules
+            labels        = { job = "systemd-journal", host = "aws-node", site = "aws-stockholm" }
+            max_age       = "12h"
+          }
+
+          loki.write "lab" {
+            endpoint {
+              url = "{{ loki_url }}"
+            }
+          }
+      notify: Restart Alloy
+
+    - name: Start Alloy now and on every boot
+      ansible.builtin.systemd:
+        name: alloy
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Restart Alloy
+      ansible.builtin.systemd:
+        name: alloy
+        state: restarted
+        daemon_reload: true
