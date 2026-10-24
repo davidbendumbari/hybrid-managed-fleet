@@ -28,6 +28,7 @@ cat > /etc/loki/config.yml << 'EOF'
 auth_enabled: false
 
 server:
+  log_level: warn
   http_listen_address: 0.0.0.0
   http_listen_port: 3100
   grpc_listen_address: 127.0.0.1
@@ -66,9 +67,10 @@ compactor:
 analytics:
   reporting_enabled: false
 EOF
-chown -R loki:loki /var/lib/loki
-chown root:loki /etc/loki/config.yml
-chmod 640 /etc/loki/config.yml
+LOKI_USER=$(systemctl show -p User --value loki)
+LOKI_USER=${LOKI_USER:-root}
+chown -R "${LOKI_USER}" /var/lib/loki
+chmod 644 /etc/loki/config.yml
 
 # Soft memory cap so Loki cannot starve Grafana and Prometheus
 mkdir -p /etc/systemd/system/loki.service.d
@@ -95,7 +97,10 @@ systemctl enable nftables
 nft -f /etc/nftables.conf
 
 # Alloy: read this VM's journal and send it to the local Loki
-usermod -aG systemd-journal alloy
+ALLOY_USER=$(systemctl show -p User --value alloy)
+if [ -n "${ALLOY_USER}" ] && [ "${ALLOY_USER}" != "root" ]; then
+  usermod -aG systemd-journal "${ALLOY_USER}"
+fi
 cat > /etc/alloy/config.alloy << 'EOF'
 loki.relabel "journal" {
   forward_to = []
@@ -122,8 +127,7 @@ loki.write "local" {
   }
 }
 EOF
-chown root:alloy /etc/alloy/config.alloy
-chmod 640 /etc/alloy/config.alloy
+chmod 644 /etc/alloy/config.alloy
 
 systemctl daemon-reload
 systemctl enable loki alloy
