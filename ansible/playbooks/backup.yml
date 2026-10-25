@@ -1,0 +1,136 @@
+---
+- name: Encrypted backups of the AWS node to S3 with restic
+  hosts: fleet
+  become: true
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.fleet-secrets"
+
+  tasks:
+    - name: Stop if the bucket name was not given
+      ansible.builtin.assert:
+        that: backup_bucket is defined
+        fail_msg: "Add -e backup_bucket=NAME to the command"
+
+    - name: Look for the restic password in CloudShell
+      ansible.builtin.stat:
+        path: "{{ secrets_dir }}/restic.pass"
+      delegate_to: localhost
+      become: false
+      register: pass_file
+
+    - name: Stop if the password file is missing
+      ansible.builtin.assert:
+        that: pass_file.stat.exists
+        fail_msg: "Create ~/.fleet-secrets/restic.pass first"
+
+    - name: Install restic
+      ansible.builtin.apt:
+        name: restic
+        state: present
+        update_cache: true
+        lock_timeout: 180
+
+    - name: Create the settings folder
+      ansible.builtin.file:
+        path: /etc/restic
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install the repository password
+      ansible.builtin.copy:
+        src: "{{ secrets_dir }}/restic.pass"
+        dest: /etc/restic/password
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Write the repository settings
+      ansible.builtin.copy:
+        dest: /etc/restic/env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          RESTIC_REPOSITORY=s3:s3.eu-north-1.amazonaws.com/{{ backup_bucket }}/fleet-node
+          RESTIC_PASSWORD_FILE=/etc/restic/password
+          AWS_DEFAULT_REGION=eu-north-1
+
+    - name: Check whether the repository already exists
+      ansible.builtin.shell: set -a; . /etc/restic/env; set +a; restic cat config
+      args:
+        executable: /bin/bash
+      register: repo_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create the repository the first time
+      ansible.builtin.shell: set -a; . /etc/restic/env; set +a; restic init
+      args:
+        executable: /bin/bash
+      when: repo_check.rc != 0
+
+    - name: Install the backup script
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/fleet-backup.sh
+        owner: root
+        group: root
+        mode: "0750"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          set -a
+          . /etc/restic/env
+          set +a
+          PATHS=""
+          for p in /srv/fleet-data /etc/ufw /etc/fail2ban /etc/ssh/sshd_config.d /etc/audit/rules.d; do
+            [ -e "$p" ] && PATHS="$PATHS $p"
+          done
+          restic backup --tag fleet-node --exclude-caches $PATHS
+          restic forget --tag fleet-node --keep-last 5 --keep-daily 7 --prune
+          echo "backup finished at $(date -u +%FT%TZ)"
+
+    - name: Install the backup service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/fleet-backup.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Encrypted restic backup to S3
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/fleet-backup.sh
+          Nice=10
+
+    - name: Install the daily timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/fleet-backup.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Daily restic backup
+
+          [Timer]
+          OnCalendar=*-*-* 02:30:00
+          RandomizedDelaySec=600
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Turn the timer on
+      ansible.builtin.systemd:
+        name: fleet-backup.timer
+        state: started
+        enabled: true
+        daemon_reload: true
