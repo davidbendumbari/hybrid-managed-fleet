@@ -1,0 +1,56 @@
+---
+- name: Create sample business data worth protecting
+  hosts: fleet
+  become: true
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.fleet-secrets"
+
+  tasks:
+    - name: Create the data folder
+      ansible.builtin.file:
+        path: /srv/fleet-data
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Add a fake customer list
+      ansible.builtin.copy:
+        dest: /srv/fleet-data/customers.csv
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+        content: |
+          id,name,city,plan
+          1,Example Ltd,Lagos,Standard
+          2,Sample GmbH,Berlin,Premium
+          3,Demo SA,Madrid,Standard
+
+    - name: Add a notes file
+      ansible.builtin.copy:
+        dest: /srv/fleet-data/notes.txt
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+        content: |
+          Sample data used to prove backup and restore work.
+
+    - name: Add a 3 MB random file
+      ansible.builtin.command: dd if=/dev/urandom of=/srv/fleet-data/archive.bin bs=1M count=3
+      args:
+        creates: /srv/fleet-data/archive.bin
+
+    - name: Record checksums of the data
+      ansible.builtin.shell: sha256sum customers.csv notes.txt archive.bin > /root/fleet-data.sha256
+      args:
+        chdir: /srv/fleet-data
+      changed_when: false
+
+    - name: Keep a copy of the checksums in CloudShell
+      ansible.builtin.fetch:
+        src: /root/fleet-data.sha256
+        dest: "{{ secrets_dir }}/fleet-data.sha256"
+        flat: true
