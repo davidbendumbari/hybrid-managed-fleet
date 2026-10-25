@@ -113,6 +113,7 @@ resource "aws_instance" "node" {
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.ssh.id]
   key_name               = aws_key_pair.fleet.key_name
+  iam_instance_profile   = "fleet-node-backup-profile"
 
   metadata_options {
     http_tokens = "required"
