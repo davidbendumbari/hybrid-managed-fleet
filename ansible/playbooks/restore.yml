@@ -1,0 +1,69 @@
+---
+- name: Restore the data from S3 and prove it is intact
+  hosts: fleet
+  become: true
+
+  vars:
+    secrets_dir: "{{ lookup('env', 'HOME') }}/.fleet-secrets"
+
+  tasks:
+    - name: Check the backup settings are in place
+      ansible.builtin.stat:
+        path: /etc/restic/env
+      register: env_file
+
+    - name: Stop if backups are not configured
+      ansible.builtin.assert:
+        that: env_file.stat.exists
+        fail_msg: "Run backup.yml first (without taking a new backup)"
+
+    - name: List the snapshots in S3
+      ansible.builtin.shell: set -a; . /etc/restic/env; set +a; restic snapshots --tag fleet-node
+      args:
+        executable: /bin/bash
+      register: snaps
+      changed_when: false
+
+    - name: Show the snapshots
+      ansible.builtin.debug:
+        var: snaps.stdout_lines
+
+    - name: Restore the latest data
+      ansible.builtin.shell: set -a; . /etc/restic/env; set +a; restic restore latest --tag fleet-node --target / --include /srv/fleet-data
+      args:
+        executable: /bin/bash
+      register: restored
+
+    - name: Show the restore result
+      ansible.builtin.debug:
+        var: restored.stdout_lines
+
+    - name: Copy the expected checksums to the server
+      ansible.builtin.copy:
+        src: "{{ secrets_dir }}/fleet-data.sha256"
+        dest: /root/expected.sha256
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Check every restored file against its checksum
+      ansible.builtin.command: sha256sum -c /root/expected.sha256
+      args:
+        chdir: /srv/fleet-data
+      register: verify
+      changed_when: false
+
+    - name: Show the verification
+      ansible.builtin.debug:
+        var: verify.stdout_lines
+
+    - name: Check the repository is healthy
+      ansible.builtin.shell: set -a; . /etc/restic/env; set +a; restic check
+      args:
+        executable: /bin/bash
+      register: repo_ok
+      changed_when: false
+
+    - name: Show the repository check
+      ansible.builtin.debug:
+        var: repo_ok.stdout_lines
